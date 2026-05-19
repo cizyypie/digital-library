@@ -1,0 +1,36 @@
+{
+  "name": "user-service",
+  "version": "1.0.0",
+  "scripts": {
+    "db": "drizzle-kit push",
+    "dev": "bun run --watch src/index.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "bun run src/db/migrate.ts",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "test": "bun test",
+    "test:watch": "bun test --watch"
+  },
+  "dependencies": {
+    "@elysiajs/cors": "latest",
+    "@elysiajs/jwt": "latest",
+    "@elysiajs/swagger": "latest",
+    "bcrypt": "^5.1.1",
+    "bun": "^1.3.14",
+    "drizzle-orm": "latest",
+    "elysia": "latest",
+    "postgres": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "bun-types": "latest",
+    "dotenv": "^16.4.7",
+    "drizzle-kit": "latest"
+  },
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
