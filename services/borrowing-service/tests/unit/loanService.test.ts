@@ -1,257 +1,338 @@
-// tests/unit/services/loanService.test.ts
-import { describe, expect, it, mock, beforeEach } from "bun:test";
-import { LoanService } from '../../src/services/loanService';
+import { describe, expect, it, mock, beforeEach, afterEach } from "bun:test";
+import { LoanService } from "../../src/services/loanService";
 
-describe('LoanService', () => {
-  let loanService: LoanService;
+let mockChannel: any;
 
+const jsonResponse = (body: any, ok = true) =>
+  ({
+    ok,
+    json: async () => body,
+  }) as Response;
+
+const thenable = <T>(value: T) => ({
+  then: (resolve: (value: T) => any, reject?: (reason: any) => any) =>
+    Promise.resolve(value).then(resolve, reject),
+});
+
+describe("LoanService", () => {
   beforeEach(() => {
-    loanService = new LoanService();
-    process.env.CATALOG_SERVICE_URL = 'http://localhost:3002';
+    process.env.CATALOG_SERVICE_URL = "http://localhost:3002";
+
+    mockChannel = {
+      sendToQueue: mock(async () => true),
+    };
+
+    global.fetch = mock(async () => jsonResponse({})) as any;
   });
 
-  describe('createLoan', () => {
-    it('should create loan successfully', async () => {
+  afterEach(() => {
+    mock.clearAllMocks();
+  });
+
+  describe("createLoan", () => {
+    it("should create loan successfully", async () => {
       const loanData = {
         userId: 1,
         bookId: 1,
       };
 
-      // Mock fetch for book check
-      global.fetch = mock(async (url: string, options?: any) => {
-        if (url.includes('/api/books/1') && !options?.method) {
-          return {
-            ok: true,
-            json: async () => ({
+      global.fetch = mock(
+        async (url: string | URL | Request, options?: RequestInit) => {
+          const urlString = String(url);
+
+          if (urlString.includes("/api/books/1") && !options?.method) {
+            return jsonResponse({
               id: 1,
-              availableCopies: 2
-            })
-          } as Response;
-        }
-        // Mock fetch for updating book copies
-        if (url.includes('/api/books/1') && options?.method === 'PUT') {
-          return {
-            ok: true,
-            json: async () => ({ success: true })
-          } as Response;
-        }
-        return new Response();
-      });
+              availableCopies: 2,
+            });
+          }
 
-      // Mock RabbitMQ channel
-      mock.module('../../../src/config/amqp', () => ({
-        getChannel: async () => ({
-          sendToQueue: async () => true
-        })
-      }));
+          if (urlString.includes("/api/books/1") && options?.method === "PUT") {
+            return jsonResponse({
+              success: true,
+            });
+          }
 
-      // Mock database
-      mock.module('../../../src/config/database', () => ({
-        db: {
-          insert: () => ({
-            values: () => ({
-              returning: () => [{
-                id: 1,
-                ...loanData,
-                status: 'ACTIVE',
-                dueDate: new Date(),
-                createdAt: new Date()
-              }]
-            })
-          })
-        }
-      }));
+          return jsonResponse({});
+        },
+      ) as any;
+
+      const mockDb = {
+        transaction: mock(async (callback: any) => {
+          return callback({
+            insert: mock(() => ({
+              values: mock(() => ({
+                returning: mock(async () => [
+                  {
+                    id: 1,
+                    userId: 1,
+                    bookId: 1,
+                    status: "ACTIVE",
+                    dueDate: new Date(),
+                    createdAt: new Date(),
+                  },
+                ]),
+              })),
+            })),
+          });
+        }),
+      };
+
+      const loanService = new LoanService(mockDb as any, async () => mockChannel);
 
       const result = await loanService.createLoan(loanData);
-      expect(result).toHaveProperty('id');
-      expect(result.status).toBe('ACTIVE');
+
+      expect(result).toHaveProperty("id");
+      expect(result.status).toBe("ACTIVE");
+      expect(mockChannel.sendToQueue).toHaveBeenCalledTimes(1);
     });
 
-    it('should throw error when book not available', async () => {
-      // Mock fetch for book with no copies
-      global.fetch = mock(async () => ({
-        ok: true,
-        json: async () => ({
+    it("should throw error when book not available", async () => {
+      global.fetch = mock(async () =>
+        jsonResponse({
           id: 1,
-          availableCopies: 0
-        })
-      } as Response));
+          availableCopies: 0,
+        }),
+      ) as any;
 
-      await expect(loanService.createLoan({ userId: 1, bookId: 1 }))
-        .rejects.toThrow('Book not available');
+      const mockDb = {};
+
+      const loanService = new LoanService(mockDb as any, async () => mockChannel);
+
+      await expect(
+        loanService.createLoan({
+          userId: 1,
+          bookId: 1,
+        }),
+      ).rejects.toThrow("Book not available");
     });
   });
 
-  describe('getAllLoans', () => {
-    it('should return paginated loans', async () => {
+  describe("getAllLoans", () => {
+    it("should return paginated loans", async () => {
       const mockLoans = [
-        { id: 1, userId: 1, bookId: 1, status: 'ACTIVE' },
-        { id: 2, userId: 2, bookId: 2, status: 'ACTIVE' }
+        {
+          id: 1,
+          userId: 1,
+          bookId: 1,
+          status: "ACTIVE",
+        },
+        {
+          id: 2,
+          userId: 2,
+          bookId: 2,
+          status: "ACTIVE",
+        },
       ];
 
-      mock.module('../../../src/config/database', () => ({
-        db: {
-          select: () => ({
-            from: () => ({
-              limit: () => ({
-                offset: () => mockLoans
-              })
-            })
-          }),
-          select: () => ({
-            from: () => [{
-              count: '2'
-            }]
-          })
-        }
-      }));
+      const mockDb = {
+        select: mock((fields?: any) => {
+          if (fields?.count) {
+            return {
+              from: mock(() => thenable([{ count: "2" }])),
+            };
+          }
+
+          return {
+            from: mock(() => ({
+              limit: mock(() => ({
+                offset: mock(() => mockLoans),
+              })),
+            })),
+          };
+        }),
+      };
+
+      const loanService = new LoanService(mockDb as any, async () => mockChannel);
 
       const result = await loanService.getAllLoans(1, 10);
+
       expect(result.data).toHaveLength(2);
       expect(result.total).toBe(2);
       expect(result.page).toBe(1);
+      expect(result.totalPages).toBe(1);
     });
   });
 
-  describe('getUserLoans', () => {
-    it('should return user loans', async () => {
+  describe("getUserLoans", () => {
+    it("should return user loans", async () => {
       const mockLoans = [
-        { id: 1, userId: 1, bookId: 1, status: 'ACTIVE' },
-        { id: 2, userId: 1, bookId: 2, status: 'RETURNED' }
+        {
+          id: 1,
+          userId: 1,
+          bookId: 1,
+          status: "ACTIVE",
+        },
+        {
+          id: 2,
+          userId: 1,
+          bookId: 2,
+          status: "RETURNED",
+        },
       ];
 
-      mock.module('../../../src/config/database', () => ({
-        db: {
-          select: () => ({
-            from: () => ({
-              where: () => mockLoans
-            })
-          })
-        }
-      }));
+      const mockDb = {
+        select: mock(() => ({
+          from: mock(() => ({
+            where: mock(async () => mockLoans),
+          })),
+        })),
+      };
+
+      const loanService = new LoanService(mockDb as any, async () => mockChannel);
 
       const result = await loanService.getUserLoans(1);
+
       expect(result).toHaveLength(2);
     });
 
-    it('should filter by status', async () => {
+    it("should filter by status", async () => {
       const mockLoans = [
-        { id: 1, userId: 1, bookId: 1, status: 'ACTIVE' }
+        {
+          id: 1,
+          userId: 1,
+          bookId: 1,
+          status: "ACTIVE",
+        },
       ];
 
-      mock.module('../../../src/config/database', () => ({
-        db: {
-          select: () => ({
-            from: () => ({
-              where: () => ({
-                where: () => mockLoans
-              })
-            })
-          })
-        }
-      }));
+      const mockDb = {
+        select: mock(() => ({
+          from: mock(() => ({
+            where: mock(async () => mockLoans),
+          })),
+        })),
+      };
 
-      const result = await loanService.getUserLoans(1, 'ACTIVE');
+      const loanService = new LoanService(mockDb as any, async () => mockChannel);
+
+      const result = await loanService.getUserLoans(1, "ACTIVE");
+
       expect(result).toHaveLength(1);
-      expect(result[0].status).toBe('ACTIVE');
+      expect(result[0].status).toBe("ACTIVE");
     });
   });
 
-  describe('returnBook', () => {
-    it('should return book successfully', async () => {
-      // Mock loan fetch
-      mock.module('../../../src/config/database', () => ({
-        db: {
-          select: () => ({
-            from: () => ({
-              where: () => ({
-                limit: () => [{
+  describe("returnBook", () => {
+    it("should return book successfully", async () => {
+      global.fetch = mock(
+        async (url: string | URL | Request, options?: RequestInit) => {
+          const urlString = String(url);
+
+          if (urlString.includes("/api/books/1") && !options?.method) {
+            return jsonResponse({
+              id: 1,
+              availableCopies: 1,
+            });
+          }
+
+          if (urlString.includes("/api/books/1") && options?.method === "PUT") {
+            return jsonResponse({
+              success: true,
+            });
+          }
+
+          return jsonResponse({});
+        },
+      ) as any;
+
+      const mockDb = {
+        select: mock(() => ({
+          from: mock(() => ({
+            where: mock(() => ({
+              limit: mock(async () => [
+                {
                   id: 1,
                   userId: 1,
                   bookId: 1,
-                  status: 'ACTIVE'
-                }]
-              })
-            })
-          }),
-          update: () => ({
-            set: () => ({
-              where: () => ({
-                returning: () => [{
-                  id: 1,
-                  status: 'RETURNED',
-                  returnDate: new Date()
-                }]
-              })
-            })
-          })
-        }
-      }));
+                  status: "ACTIVE",
+                },
+              ]),
+            })),
+          })),
+        })),
 
-      // Mock fetch for book update
-      global.fetch = mock(async (url: string) => ({
-        ok: true,
-        json: async () => ({
-          id: 1,
-          availableCopies: 1
-        })
-      } as Response));
+        transaction: mock(async (callback: any) => {
+          return callback({
+            update: mock(() => ({
+              set: mock(() => ({
+                where: mock(() => ({
+                  returning: mock(async () => [
+                    {
+                      id: 1,
+                      userId: 1,
+                      bookId: 1,
+                      status: "RETURNED",
+                      returnDate: new Date(),
+                    },
+                  ]),
+                })),
+              })),
+            })),
+          });
+        }),
+      };
 
-      // Mock RabbitMQ channel
-      mock.module('../../../src/config/amqp', () => ({
-        getChannel: async () => ({
-          sendToQueue: async () => true
-        })
-      }));
+      const loanService = new LoanService(mockDb as any, async () => mockChannel);
 
       const result = await loanService.returnBook(1);
-      expect(result.status).toBe('RETURNED');
-      expect(result).toHaveProperty('returnDate');
+
+      expect(result.status).toBe("RETURNED");
+      expect(result).toHaveProperty("returnDate");
+      expect(mockChannel.sendToQueue).toHaveBeenCalledTimes(1);
     });
 
-    it('should throw error for invalid loan', async () => {
-      mock.module('../../../src/config/database', () => ({
-        db: {
-          select: () => ({
-            from: () => ({
-              where: () => ({
-                limit: () => []
-              })
-            })
-          })
-        }
-      }));
+    it("should throw error for invalid loan", async () => {
+      const mockDb = {
+        select: mock(() => ({
+          from: mock(() => ({
+            where: mock(() => ({
+              limit: mock(async () => []),
+            })),
+          })),
+        })),
+      };
 
-      await expect(loanService.returnBook(999))
-        .rejects.toThrow('Invalid loan or already returned');
+      const loanService = new LoanService(mockDb as any, async () => mockChannel);
+
+      await expect(loanService.returnBook(999)).rejects.toThrow(
+        "Invalid loan or already returned",
+      );
     });
   });
 
-  describe('checkOverdueLoans', () => {
-    it('should update overdue loans', async () => {
+  describe("checkOverdueLoans", () => {
+    it("should update overdue loans", async () => {
       const mockOverdueLoans = [
-        { id: 1, userId: 1, bookId: 1, status: 'ACTIVE', dueDate: new Date('2023-01-01') }
+        {
+          id: 1,
+          userId: 1,
+          bookId: 1,
+          status: "ACTIVE",
+          dueDate: new Date("2023-01-01"),
+        },
       ];
 
-      mock.module('../../../src/config/database', () => ({
-        db: {
-          select: () => ({
-            from: () => ({
-              where: () => ({
-                where: () => mockOverdueLoans
-              })
-            })
-          }),
-          update: () => ({
-            set: () => ({
-              where: () => ({ success: true })
-            })
-          })
-        }
-      }));
+      const mockDb = {
+        select: mock(() => ({
+          from: mock(() => ({
+            where: mock(async () => mockOverdueLoans),
+          })),
+        })),
+
+        update: mock(() => ({
+          set: mock(() => ({
+            where: mock(async () => ({ success: true })),
+          })),
+        })),
+      };
+
+      const loanService = new LoanService(mockDb as any, async () => mockChannel);
 
       const result = await loanService.checkOverdueLoans();
+
       expect(result).toHaveLength(1);
+      expect(result[0].status).toBe("ACTIVE");
     });
   });
 });

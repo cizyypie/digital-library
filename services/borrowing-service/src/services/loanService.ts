@@ -4,12 +4,16 @@ import { loans } from "../models/schema";
 import { getChannel } from "../config/amqp";
 
 export class LoanService {
+  constructor(
+    private readonly database = db,
+    private readonly getMqChannel = getChannel,
+  ) {}
+
   async createLoan(loanData: any) {
     try {
       const dueDate = new Date();
       dueDate.setDate(dueDate.getDate() + 14);
 
-      // 1. Fetch book details from catalog service
       const bookResponse = await fetch(
         `${process.env.CATALOG_SERVICE_URL}/api/books/${loanData.bookId}`,
       );
@@ -20,13 +24,12 @@ export class LoanService {
       }
 
       const book = await bookResponse.json();
+
       if (!book || book.availableCopies < 1) {
         throw new Error("Book not available");
       }
 
-      // 2. Wrap database mutation and message queue logic safely
-      // (Using a transaction guarantees we don't save a loan if AMQP crashes)
-      const loan = await db.transaction(async (tx) => {
+      const loan = await this.database.transaction(async (tx: any) => {
         const inserted = await tx
           .insert(loans)
           .values({
@@ -39,8 +42,8 @@ export class LoanService {
         return inserted[0];
       });
 
-      // 3. Dispatch Event Queue Notification
-      const channel = await getChannel();
+      const channel = await this.getMqChannel();
+
       await channel.sendToQueue(
         "loan.due",
         Buffer.from(
@@ -52,14 +55,13 @@ export class LoanService {
         ),
       );
 
-      // 4. Update book availability in Catalog Service
-      // Ideal world: This happens asynchronously via RabbitMQ consumer in Catalog Service.
-      // Current world: We execute the PUT API wrapper.
       await fetch(
         `${process.env.CATALOG_SERVICE_URL}/api/books/${loanData.bookId}`,
         {
           method: "PUT",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+          },
           body: JSON.stringify({
             availableCopies: book.availableCopies - 1,
           }),
@@ -76,14 +78,21 @@ export class LoanService {
   async getAllLoans(page: number = 1, limit: number = 10) {
     try {
       const offset = (page - 1) * limit;
-      const query = db.select().from(loans).limit(limit).offset(offset);
+
+      const query = this.database
+        .select()
+        .from(loans)
+        .limit(limit)
+        .offset(offset);
 
       const [data, total] = await Promise.all([
         query,
-        db
-          .select({ count: sql<number>`count(*)` })
+        this.database
+          .select({
+            count: sql<number>`count(*)`,
+          })
           .from(loans)
-          .then((res) => Number(res[0].count)),
+          .then((res: any[]) => Number(res[0].count)),
       ]);
 
       return {
@@ -100,14 +109,13 @@ export class LoanService {
 
   async getUserLoans(userId: number, status?: string) {
     try {
-      // Collect conditions in an array to avoid method chaining errors
       const conditions: any[] = [eq(loans.userId, userId)];
 
       if (status) {
         conditions.push(eq(loans.status, status as any));
       }
 
-      const userLoans = await db
+      const userLoans = await this.database
         .select()
         .from(loans)
         .where(and(...conditions));
@@ -121,7 +129,7 @@ export class LoanService {
 
   async returnBook(loanId: number) {
     try {
-      const loanResult = await db
+      const loanResult = await this.database
         .select()
         .from(loans)
         .where(eq(loans.id, loanId))
@@ -133,8 +141,7 @@ export class LoanService {
 
       const activeLoan = loanResult[0];
 
-      // Update loan status using transaction safety
-      const updatedLoan = await db.transaction(async (tx) => {
+      const updatedLoan = await this.database.transaction(async (tx: any) => {
         const updated = await tx
           .update(loans)
           .set({
@@ -144,13 +151,14 @@ export class LoanService {
           })
           .where(eq(loans.id, loanId))
           .returning();
+
         return updated[0];
       });
 
-      // Update book availability in catalog service
       const bookResponse = await fetch(
         `${process.env.CATALOG_SERVICE_URL}/api/books/${activeLoan.bookId}`,
       );
+
       if (!bookResponse.ok) {
         throw new Error("Failed to fetch book data from catalog service");
       }
@@ -161,14 +169,17 @@ export class LoanService {
         `${process.env.CATALOG_SERVICE_URL}/api/books/${activeLoan.bookId}`,
         {
           method: "PUT",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+          },
           body: JSON.stringify({
             availableCopies: book.availableCopies + 1,
           }),
         },
       );
 
-      const channel = await getChannel();
+      const channel = await this.getMqChannel();
+
       await channel.sendToQueue(
         "book.returned",
         Buffer.from(
@@ -182,6 +193,11 @@ export class LoanService {
       return updatedLoan;
     } catch (error) {
       console.error("Error in returnBook:", error);
+
+      if (error instanceof Error) {
+        throw error;
+      }
+
       throw new Error("Failed to return book");
     }
   }
@@ -190,20 +206,24 @@ export class LoanService {
     try {
       const now = new Date();
 
-      // Corrected Drizzle syntax for matching conditions using lt()
-      const overdueLoans = await db
+      const overdueLoans = await this.database
         .select()
         .from(loans)
         .where(and(eq(loans.status, "ACTIVE"), lt(loans.dueDate, now)));
 
-      if (overdueLoans.length === 0) return [];
+      if (overdueLoans.length === 0) {
+        return [];
+      }
 
-      // Optimized bulk update instead of a slow loop structure
-      const loanIds = overdueLoans.map((loan) => loan.id);
-      await db
+      const loanIds = overdueLoans.map((loan: any) => loan.id);
+
+      await this.database
         .update(loans)
-        .set({ status: "OVERDUE", updatedAt: now })
-        .where(sql`${loans.id} IN ${loanIds}`); // Using bulk SQL injection/In operation
+        .set({
+          status: "OVERDUE",
+          updatedAt: now,
+        })
+        .where(sql`${loans.id} IN ${loanIds}`);
 
       return overdueLoans;
     } catch (error) {
